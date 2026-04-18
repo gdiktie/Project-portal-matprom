@@ -6,6 +6,12 @@
 <script src="https://cdn.tailwindcss.com"></script>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&amp;family=Sora:wght@400;600;700;800&amp;display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+  if (typeof pdfjsLib !== 'undefined') {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  }
+</script>
 <style>
   :root {
     --red: #D0282E;
@@ -83,6 +89,9 @@
   .img-preview-box { border-radius:10px; overflow:hidden; border:1.5px solid var(--border); background:var(--bg); display:none; position:relative; }
   .img-preview-box img { width:100%; height:180px; object-fit:cover; display:block; }
   .img-preview-box .remove-preview { position:absolute; top:8px; right:8px; background:rgba(0,0,0,.6); color:#fff; border:none; border-radius:99px; width:26px; height:26px; font-size:.7rem; cursor:pointer; display:flex; align-items:center; justify-content:center; }
+  .pdf-preview-canvas { width:100%; height:180px; object-fit:contain; display:block; background:#fff; }
+  .preview-loading { display:flex; align-items:center; justify-content:center; height:180px; color:var(--muted); font-size:.8rem; gap:8px; }
+  .preview-badge { position:absolute; bottom:8px; left:8px; background:rgba(0,0,0,.65); color:#fff; font-size:.65rem; font-weight:700; border-radius:6px; padding:3px 8px; letter-spacing:.03em; }
   .btn-download { background: var(--navy); color: #fff; border-radius: 8px; padding: 8px 16px; font-size: .8rem; font-weight: 600; border: none; cursor: pointer; transition: background .15s; display: flex; align-items: center; gap: 6px; }
   .btn-download:hover { background: var(--red); }
   .btn-delete { background: #fff; color: var(--red); border: 1.5px solid var(--red); border-radius: 8px; padding: 7px 14px; font-size: .8rem; font-weight: 600; cursor: pointer; transition: all .15s; display: flex; align-items: center; gap: 5px; }
@@ -716,6 +725,10 @@ let mediaData = [
   {id:10,title:"Logo & Brand Guidelines 2024",cat:"logo",segment:"cetak",month:"Januari",isNew:false,icon:"fa-star",color:"#fef9c3",iconColor:"#C8922A",size:"15 MB",thumb:null},
 ];
 
+// ── GANTI dengan URL Deploy Apps Script kamu ─────────────────
+const API_URL = 'https://script.google.com/home/projects/1FEtgxVu_vi5_dD53fm1bFonxrBDES6c_TKxDLhz-3sVgGd4woq_ubVmb/edit';
+// ─────────────────────────────────────────────────────────────
+
 let currentUser = null;
 let activeMonth = "April";
 let activeCat = "all";
@@ -723,18 +736,56 @@ let selectedDownloadId = null;
 let loginTabMode = "kpno";
 let registerTabMode = "kpno";
 
+// ===== API HELPER =====
+async function apiCall(action, payload = {}) {
+  const res = await fetch(API_URL, {
+    method: 'POST',
+    body: JSON.stringify({ action, ...payload }),
+  });
+  return res.json();
+}
+
 // ===== INIT =====
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   buildMonthTabs();
   populateBranches();
   setupFileInput();
 
+  // Cek sesi dari sessionStorage (masih berfungsi dalam tab yang sama)
   const saved = sessionStorage.getItem('sm_user');
   if (saved) {
     currentUser = JSON.parse(saved);
+    await loadMediaFromSheets();
     onLoginSuccess();
   }
 });
+
+// ===== LOAD MEDIA DARI SHEETS =====
+async function loadMediaFromSheets() {
+  try {
+    showLoadingOverlay(true);
+    const resp = await apiCall('getMedia');
+    if (resp.ok && resp.data.length > 0) {
+      mediaData = resp.data;
+    }
+  } catch(e) {
+    console.warn('Gagal load dari Sheets, pakai data lokal', e);
+  } finally {
+    showLoadingOverlay(false);
+  }
+}
+
+function showLoadingOverlay(show) {
+  let el = document.getElementById('loading-overlay');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'loading-overlay';
+    el.style.cssText = 'position:fixed;inset:0;background:rgba(26,35,64,.55);z-index:999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(3px);';
+    el.innerHTML = '<div style="background:#fff;border-radius:16px;padding:32px 40px;text-align:center;"><i class="fa-solid fa-spinner fa-spin text-red-500 text-2xl block mb-3"></i><div style="font-weight:600;color:#1A2340;font-size:.9rem;">Memuat data...</div></div>';
+    document.body.appendChild(el);
+  }
+  el.style.display = show ? 'flex' : 'none';
+}
 
 function buildMonthTabs() {
   const wrap = document.getElementById('month-tabs');
@@ -778,16 +829,101 @@ function handleFileSelect(file, prefix) {
   fn.textContent = '📎 ' + file.name + ' (' + (file.size > 1048576 ? (file.size/1048576).toFixed(1)+' MB' : Math.round(file.size/1024)+' KB') + ')';
   fn.classList.remove('hidden');
 
-  // Show image preview if file is an image
   const previewBox = document.getElementById(prefix + '-img-preview-box');
   const previewImg = document.getElementById(prefix + '-img-preview');
-  if (file.type.startsWith('image/')) {
+
+  const isImage = file.type.startsWith('image/') || /\.(png|jpe?g)$/i.test(file.name);
+  const isPDF = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
+
+  if (isImage) {
+    // Show image preview
     const reader = new FileReader();
     reader.onload = (e) => {
+      // Clear any canvas from PDF
+      const existCanvas = previewBox.querySelector('canvas');
+      if (existCanvas) existCanvas.remove();
+      const existBadge = previewBox.querySelector('.preview-badge');
+      if (existBadge) existBadge.remove();
+      const existLoading = previewBox.querySelector('.preview-loading');
+      if (existLoading) existLoading.remove();
+
       previewImg.src = e.target.result;
+      previewImg.style.display = 'block';
+      previewImg.style.height = '180px';
+      previewImg.style.objectFit = 'cover';
+
+      // Badge tipe file
+      const badge = document.createElement('div');
+      badge.className = 'preview-badge';
+      badge.innerHTML = `<i class="fa-solid fa-image mr-1"></i>${file.name.split('.').pop().toUpperCase()}`;
+      previewBox.appendChild(badge);
+
       previewBox.style.display = 'block';
     };
     reader.readAsDataURL(file);
+
+  } else if (isPDF) {
+    // Show PDF first page as preview
+    previewImg.style.display = 'none';
+    previewImg.src = '';
+
+    // Clear previous canvas/loading
+    const existCanvas = previewBox.querySelector('canvas');
+    if (existCanvas) existCanvas.remove();
+    const existBadge = previewBox.querySelector('.preview-badge');
+    if (existBadge) existBadge.remove();
+    let existLoading = previewBox.querySelector('.preview-loading');
+    if (existLoading) existLoading.remove();
+
+    // Loading indicator
+    const loading = document.createElement('div');
+    loading.className = 'preview-loading';
+    loading.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Memuat preview PDF...`;
+    previewBox.appendChild(loading);
+    previewBox.style.display = 'block';
+
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      try {
+        if (typeof pdfjsLib === 'undefined') throw new Error('PDF.js not loaded');
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        const pdfData = new Uint8Array(e.target.result);
+        const pdf = await pdfjsLib.getDocument({ data: pdfData }).promise;
+        const page = await pdf.getPage(1);
+        const viewport = page.getViewport({ scale: 1.5 });
+
+        const canvas = document.createElement('canvas');
+        canvas.className = 'pdf-preview-canvas';
+        const ctx = canvas.getContext('2d');
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+
+        await page.render({ canvasContext: ctx, viewport }).promise;
+
+        // Remove loading, add canvas
+        const ld = previewBox.querySelector('.preview-loading');
+        if (ld) ld.remove();
+        previewBox.appendChild(canvas);
+
+        // Store base64 thumb from canvas for card display
+        const thumbDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+        previewImg.src = thumbDataUrl;
+
+        // Badge
+        const badge = document.createElement('div');
+        badge.className = 'preview-badge';
+        badge.innerHTML = `<i class="fa-solid fa-file-pdf mr-1"></i>PDF · Halaman 1 dari ${pdf.numPages}`;
+        previewBox.appendChild(badge);
+
+      } catch (err) {
+        const ld = previewBox.querySelector('.preview-loading');
+        if (ld) {
+          ld.innerHTML = `<i class="fa-solid fa-triangle-exclamation text-orange-400"></i> Tidak dapat memuat preview PDF`;
+        }
+      }
+    };
+    reader.readAsArrayBuffer(file);
+
   } else {
     previewBox.style.display = 'none';
     previewImg.src = '';
@@ -817,14 +953,20 @@ function handleDrop(e, prefix) {
 }
 
 function removeUploadPreview() {
-  document.getElementById('up-img-preview-box').style.display = 'none';
+  const box = document.getElementById('up-img-preview-box');
+  box.style.display = 'none';
   document.getElementById('up-img-preview').src = '';
+  document.getElementById('up-img-preview').style.display = 'none';
+  box.querySelectorAll('canvas,.preview-badge,.preview-loading').forEach(el => el.remove());
   document.getElementById('up-file').value = '';
   document.getElementById('up-file-name').classList.add('hidden');
 }
 function removeEditPreview() {
-  document.getElementById('edit-img-preview-box').style.display = 'none';
+  const box = document.getElementById('edit-img-preview-box');
+  box.style.display = 'none';
   document.getElementById('edit-img-preview').src = '';
+  document.getElementById('edit-img-preview').style.display = 'none';
+  box.querySelectorAll('canvas,.preview-badge,.preview-loading').forEach(el => el.remove());
   document.getElementById('edit-file').value = '';
   document.getElementById('edit-file-name').classList.add('hidden');
 }
@@ -921,44 +1063,37 @@ function switchRegisterTab(mode) {
 }
 
 // ===== AUTH =====
-function doLogin() {
+async function doLogin() {
   const idcard = document.getElementById('login-idcard').value.trim();
   const pwd = document.getElementById('login-password').value;
   if (!idcard || idcard.length !== 4) { showToast('error', 'Masukkan 4 digit pertama ID Card'); return; }
   if (!pwd) { showToast('error', 'Password tidak boleh kosong'); return; }
 
-  // Demo logic — in production, call backend API
-  const users = JSON.parse(localStorage.getItem('sm_users') || '[]');
-  const user = users.find(u => u.idcard4 === idcard && u.password === pwd && u.role === loginTabMode);
-  if (user) {
-    currentUser = user;
-    sessionStorage.setItem('sm_user', JSON.stringify(user));
-    closeModal('login');
-    onLoginSuccess();
-    showToast('success', `Selamat datang, ${user.nama.split(' ')[0]}!`);
-  } else {
-    // Demo: auto-create demo account for showcase
-    if (idcard === '1234' && pwd === 'demo1234') {
-      const demoUser = { nama: 'Demo KPNO User', idcard4: '1234', role: 'kpno', cabang: 'KPNO Pusat', email: 'demo@simasfinance.co.id' };
-      currentUser = demoUser;
-      sessionStorage.setItem('sm_user', JSON.stringify(demoUser));
+  const btnLogin = document.querySelector('#modal-login .btn-red-full');
+  btnLogin.disabled = true;
+  btnLogin.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-2"></i>Memeriksa...';
+
+  try {
+    const resp = await apiCall('login', { idcard4: idcard, password: pwd, role: loginTabMode });
+    if (resp.ok) {
+      currentUser = resp.user;
+      sessionStorage.setItem('sm_user', JSON.stringify(resp.user));
       closeModal('login');
+      await loadMediaFromSheets();
       onLoginSuccess();
-      showToast('success', 'Selamat datang, Demo User!');
-    } else if (idcard === '5678' && pwd === 'demo5678') {
-      const demoUser = { nama: 'Demo Cabang User', idcard4: '5678', role: 'cabang', cabang: 'Jakarta Selatan', email: 'demo2@simasfinance.co.id' };
-      currentUser = demoUser;
-      sessionStorage.setItem('sm_user', JSON.stringify(demoUser));
-      closeModal('login');
-      onLoginSuccess();
-      showToast('success', 'Selamat datang, Demo Cabang!');
+      showToast('success', `Selamat datang, ${resp.user.nama.split(' ')[0]}!`);
     } else {
-      showToast('error', 'ID Card atau password salah');
+      showToast('error', resp.msg || 'ID Card atau password salah');
     }
+  } catch (err) {
+    showToast('error', 'Gagal terhubung ke server. Coba lagi.');
+  } finally {
+    btnLogin.disabled = false;
+    btnLogin.innerHTML = '<i class="fa-solid fa-right-to-bracket mr-2"></i>Masuk Portal';
   }
 }
 
-function doRegister() {
+async function doRegister() {
   const nama = document.getElementById('reg-nama').value.trim();
   const nik = document.getElementById('reg-nik').value.trim();
   const idcard = document.getElementById('reg-idcard').value.trim();
@@ -979,24 +1114,34 @@ function doRegister() {
   if (pwd.length < 8) { showToast('error', 'Password minimal 8 karakter'); return; }
   if (pwd !== confirm) { showToast('error', 'Password tidak cocok'); return; }
 
-  const users = JSON.parse(localStorage.getItem('sm_users') || '[]');
-  const exists = users.find(u => u.idcard4 === idcard.substring(0,4) && u.role === registerTabMode);
-  if (exists) { showToast('error', 'ID Card sudah terdaftar'); return; }
+  const btnReg = document.querySelector('#modal-register .btn-red-full');
+  btnReg.disabled = true;
+  btnReg.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-2"></i>Mendaftarkan...';
 
-  const newUser = {
-    nama, nik, idcard8: idcard, idcard4: idcard.substring(0,4),
-    email, telp, cabang: unit, role: registerTabMode, password: pwd
-  };
-  users.push(newUser);
-  localStorage.setItem('sm_users', JSON.stringify(users));
-  showToast('success', 'Registrasi berhasil! Silakan login.');
-  closeModal('register');
-  setTimeout(() => openModal('login'), 400);
+  try {
+    const resp = await apiCall('register', {
+      nama, nik, idcard8: idcard, idcard4: idcard.substring(0, 4),
+      email, telp, cabang: unit, role: registerTabMode, password: pwd
+    });
+    if (resp.ok) {
+      showToast('success', resp.msg || 'Registrasi berhasil! Silakan login.');
+      closeModal('register');
+      setTimeout(() => openModal('login'), 400);
+    } else {
+      showToast('error', resp.msg || 'Registrasi gagal');
+    }
+  } catch (err) {
+    showToast('error', 'Gagal terhubung ke server. Coba lagi.');
+  } finally {
+    btnReg.disabled = false;
+    btnReg.innerHTML = '<i class="fa-solid fa-user-plus mr-2"></i>Daftar Sekarang';
+  }
 }
 
 function logout() {
   currentUser = null;
   sessionStorage.removeItem('sm_user');
+  mediaData = [];
   document.getElementById('gate-section').classList.remove('hidden');
   document.getElementById('content-section').classList.add('hidden');
   document.getElementById('user-info').classList.add('hidden');
@@ -1114,11 +1259,18 @@ function openDownload(id, title) {
 function confirmDownload() {
   closeModal('dl');
   showToast('success','Materi sedang diunduh...');
-  // In production: trigger actual file download
+  if (currentUser && selectedDownloadId) {
+    const item = mediaData.find(d => d.id === selectedDownloadId);
+    apiCall('logDownload', {
+      userId: currentUser.idcard4,
+      itemId: String(selectedDownloadId),
+      itemTitle: item ? item.title : ''
+    }).catch(() => {});
+  }
 }
 
 // ===== UPLOAD =====
-function doUpload() {
+async function doUpload() {
   const judul = document.getElementById('up-judul').value.trim();
   const kat = document.getElementById('up-kategori').value;
   const bulan = document.getElementById('up-bulan').value;
@@ -1131,7 +1283,8 @@ function doUpload() {
   const segMap = {brosur:'cetak',banner:'cetak',instagram:'instagram',formulir:'cetak',video:'cetak',logo:'cetak'};
 
   const file = document.getElementById('up-file').files[0];
-  const thumbSrc = document.getElementById('up-img-preview').src || null;
+  const previewImgEl = document.getElementById('up-img-preview');
+  const thumbSrc = previewImgEl.src || null;
   const hasThumb = thumbSrc && thumbSrc.startsWith('data:image');
 
   const newItem = {
@@ -1141,21 +1294,26 @@ function doUpload() {
     size: file ? (file.size > 1048576 ? (file.size/1048576).toFixed(1)+' MB' : Math.round(file.size/1024)+' KB') : '–',
     thumb: hasThumb ? thumbSrc : null,
   };
+
+  const btn = document.querySelector('#modal-upload .btn-red-full');
+  btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-2"></i>Mengupload...';
+
+  try { await apiCall('addMedia', { item: newItem }); } catch(e) { /* fallback lokal */ }
   mediaData.unshift(newItem);
+
+  btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-cloud-arrow-up mr-2"></i>Upload Materi';
   closeModal('upload');
   activeMonth = bulan;
-  document.querySelectorAll('.month-tab').forEach(b => {
-    b.classList.toggle('active', b.textContent === bulan);
-  });
+  document.querySelectorAll('.month-tab').forEach(b => b.classList.toggle('active', b.textContent === bulan));
   renderCards();
   showToast('success','Materi berhasil diupload!');
-  // Reset
   document.getElementById('up-judul').value = '';
   document.getElementById('up-kategori').value = '';
   document.getElementById('up-bulan').value = '';
   document.getElementById('up-isnew').checked = false;
   document.getElementById('up-file-name').classList.add('hidden');
   removeUploadPreview();
+  document.getElementById('up-img-preview').style.display = 'none';
 }
 
 // ===== EDIT =====
@@ -1170,7 +1328,6 @@ function openEdit(id) {
   document.getElementById('edit-file-name').classList.add('hidden');
   document.getElementById('edit-file').value = '';
 
-  // Show existing thumbnail if available
   const previewBox = document.getElementById('edit-img-preview-box');
   const previewImg = document.getElementById('edit-img-preview');
   if (item.thumb) {
@@ -1183,7 +1340,7 @@ function openEdit(id) {
   openModal('edit');
 }
 
-function doEdit() {
+async function doEdit() {
   const id = parseInt(document.getElementById('edit-id').value);
   const judul = document.getElementById('edit-judul').value.trim();
   const kat = document.getElementById('edit-kategori').value;
@@ -1204,36 +1361,35 @@ function doEdit() {
   const oldThumb = mediaData[idx].thumb;
   const newFile = document.getElementById('edit-file').files[0];
   const editThumbSrc = document.getElementById('edit-img-preview').src;
-  const hasNewThumb = editThumbSrc && editThumbSrc.startsWith('data:image');
-
-  // If preview box is hidden, user removed the thumbnail
+  const hasNewThumb = editThumbSrc && editThumbSrc.startsWith('data:image') && editThumbSrc.length > 50;
   const previewVisible = document.getElementById('edit-img-preview-box').style.display !== 'none';
 
-  mediaData[idx] = {
+  const updatedItem = {
     ...mediaData[idx],
-    title: judul,
-    cat: kat,
-    segment: segMap[kat] || 'cetak',
-    month: bulan,
-    isNew,
-    icon: iconMap[kat] || 'fa-file',
-    color: colorMap[kat] || '#f5f5f5',
-    iconColor: icMap[kat] || '#888',
+    title: judul, cat: kat, segment: segMap[kat] || 'cetak',
+    month: bulan, isNew, icon: iconMap[kat] || 'fa-file',
+    color: colorMap[kat] || '#f5f5f5', iconColor: icMap[kat] || '#888',
     size: newFile ? (newFile.size > 1048576 ? (newFile.size/1048576).toFixed(1)+' MB' : Math.round(newFile.size/1024)+' KB') : oldSize,
     thumb: hasNewThumb ? editThumbSrc : (previewVisible ? oldThumb : null),
   };
 
+  const btn = document.querySelector('#modal-edit .btn-red-full');
+  btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-2"></i>Menyimpan...';
+
+  try { await apiCall('editMedia', { item: updatedItem }); } catch(e) { /* fallback lokal */ }
+  mediaData[idx] = updatedItem;
+
+  btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-floppy-disk mr-2"></i>Simpan Perubahan';
   closeModal('edit');
   activeMonth = bulan;
-  document.querySelectorAll('.month-tab').forEach(b => {
-    b.classList.toggle('active', b.textContent === bulan);
-  });
+  document.querySelectorAll('.month-tab').forEach(b => b.classList.toggle('active', b.textContent === bulan));
   renderCards();
   showToast('success','Materi berhasil diperbarui!');
 }
 
-function deleteCard(id) {
+async function deleteCard(id) {
   if (!confirm('Hapus materi ini?')) return;
+  try { await apiCall('deleteMedia', { id: String(id) }); } catch(e) { /* fallback lokal */ }
   mediaData = mediaData.filter(d => d.id !== id);
   renderCards();
   showToast('success','Materi berhasil dihapus');
